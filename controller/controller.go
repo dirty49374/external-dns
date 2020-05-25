@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"math/rand"
 	"reflect"
 	"sync"
 	"time"
@@ -112,6 +113,8 @@ type Controller struct {
 	Policy plan.Policy
 	// The interval between individual synchronizations
 	Interval time.Duration
+	// The jitter duration of synchronizations interval
+	IntervalJitter time.Duration
 	// The DomainFilter defines which DNS records to keep or exclude
 	DomainFilter endpoint.DomainFilter
 	// The nextRunAt used for throttling and batching reconciliation
@@ -195,7 +198,12 @@ func (c *Controller) ShouldRunOnce(now time.Time) bool {
 	if now.Before(c.nextRunAt) {
 		return false
 	}
-	c.nextRunAt = now.Add(c.Interval)
+
+	interval := c.Interval
+	if c.IntervalJitter != 0 {
+		interval = interval + time.Duration(rand.Int63n(int64(c.IntervalJitter)))
+	}
+	c.nextRunAt = now.Add(interval)
 	return true
 }
 

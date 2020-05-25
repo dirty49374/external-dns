@@ -111,6 +111,7 @@ type Config struct {
 	TXTPrefix                         string
 	TXTSuffix                         string
 	Interval                          time.Duration
+	IntervalJitter                    time.Duration
 	Once                              bool
 	DryRun                            bool
 	UpdateEvents                      bool
@@ -209,6 +210,7 @@ var defaultConfig = &Config{
 	TXTSuffix:                   "",
 	TXTCacheInterval:            0,
 	Interval:                    time.Minute,
+	IntervalJitter:              time.Minute,
 	Once:                        false,
 	DryRun:                      false,
 	UpdateEvents:                false,
@@ -400,6 +402,7 @@ func (cfg *Config) ParseFlags(args []string) error {
 	// Flags related to the main control loop
 	app.Flag("txt-cache-interval", "The interval between cache synchronizations in duration format (default: disabled)").Default(defaultConfig.TXTCacheInterval.String()).DurationVar(&cfg.TXTCacheInterval)
 	app.Flag("interval", "The interval between two consecutive synchronizations in duration format (default: 1m)").Default(defaultConfig.Interval.String()).DurationVar(&cfg.Interval)
+	app.Flag("interval-jitter", "The jitter duration of synchronization interval in duration format (default: 0)").Default(defaultConfig.IntervalJitter.String()).DurationVar(&cfg.IntervalJitter)
 	app.Flag("once", "When enabled, exits the synchronization loop after the first iteration (default: disabled)").BoolVar(&cfg.Once)
 	app.Flag("dry-run", "When enabled, prints DNS record changes rather than actually performing them (default: disabled)").BoolVar(&cfg.DryRun)
 	app.Flag("events", "When enabled, in addition to running every interval, the reconciliation loop will get triggered when supported sources change (default: disabled)").BoolVar(&cfg.UpdateEvents)
