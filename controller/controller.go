@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"time"
 
@@ -115,8 +116,12 @@ type Controller struct {
 	DomainFilter endpoint.DomainFilter
 	// The nextRunAt used for throttling and batching reconciliation
 	nextRunAt time.Time
+	// The nextCompareAt used for throttling comparing desigred records changes
+	nextTestAt time.Time
 	// The nextRunAtMux is for atomic updating of nextRunAt
 	nextRunAtMux sync.Mutex
+	// List of desired records that successfully synced
+	lastDesiredRecords []*endpoint.Endpoint
 }
 
 // RunOnce runs a single iteration of a reconciliation loop.
@@ -155,20 +160,35 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		return err
 	}
 
+	c.lastDesiredRecords = endpoints
+
 	lastSyncTimestamp.SetToCurrentTime()
 	return nil
+}
+
+func (c *Controller) TestOnce(ctx context.Context) (bool, error) {
+	if c.lastDesiredRecords == nil {
+		return true, nil
+	}
+
+	endpoints, err := c.Source.Endpoints()
+	if err != nil {
+		return false, err
+	}
+
+	return !endpointsEquals(c.lastDesiredRecords, endpoints), nil
 }
 
 // MIN_INTERVAL is used as window for batching events
 const MIN_INTERVAL = 5 * time.Second
 
-// RunOnceThrottled makes sure execution happens at most once per interval.
 func (c *Controller) ScheduleRunOnce(now time.Time) {
 	c.nextRunAtMux.Lock()
 	defer c.nextRunAtMux.Unlock()
 	c.nextRunAt = now.Add(MIN_INTERVAL)
 }
 
+// ShouldRunOnce makes sure execution happens at most once per interval.
 func (c *Controller) ShouldRunOnce(now time.Time) bool {
 	c.nextRunAtMux.Lock()
 	defer c.nextRunAtMux.Unlock()
@@ -176,6 +196,22 @@ func (c *Controller) ShouldRunOnce(now time.Time) bool {
 		return false
 	}
 	c.nextRunAt = now.Add(c.Interval)
+	return true
+}
+
+func (c *Controller) ScheduleTestOnce(now time.Time) {
+	c.nextRunAtMux.Lock()
+	defer c.nextRunAtMux.Unlock()
+	c.nextTestAt = now.Add(MIN_INTERVAL)
+}
+
+func (c *Controller) ShouldTestOnce(now time.Time) bool {
+	c.nextRunAtMux.Lock()
+	defer c.nextRunAtMux.Unlock()
+	if c.nextTestAt.IsZero() || now.Before(c.nextTestAt) {
+		return false
+	}
+	c.nextTestAt = time.Time{}
 	return true
 }
 
@@ -188,6 +224,12 @@ func (c *Controller) Run(ctx context.Context) {
 			if err := c.RunOnce(ctx); err != nil {
 				log.Error(err)
 			}
+		} else if c.ShouldTestOnce(time.Now()) {
+			if changed, err := c.TestOnce(ctx); err != nil {
+				log.Error(err)
+			} else if changed {
+				c.ScheduleRunOnce(time.Now())
+			}
 		}
 		select {
 		case <-ticker.C:
@@ -196,4 +238,59 @@ func (c *Controller) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func endpointsEquals(last []*endpoint.Endpoint, curr []*endpoint.Endpoint) bool {
+	if len(last) != len(curr) {
+		log.Tracef("Test: # of records changed (last=%d current=%d)", len(last), len(curr))
+		return false
+	}
+
+	lastEndpoints := make(map[string]*endpoint.Endpoint, len(last))
+	for _, endpoint := range last {
+		lastEndpoints[endpoint.DNSName] = endpoint
+	}
+
+	for _, currEndpoint := range curr {
+		lastEndpoint, ok := lastEndpoints[currEndpoint.DNSName]
+		if !ok {
+			log.Infof("Test: found new record (%s)", currEndpoint.DNSName)
+			return false
+		}
+
+		if !endpointEquals(lastEndpoint, currEndpoint) {
+			log.Infof("Test: found changed record (%s)", currEndpoint.DNSName)
+			return false
+		}
+	}
+
+	log.Infof("Test: not changed")
+	return true
+}
+
+func endpointEquals(last *endpoint.Endpoint, curr *endpoint.Endpoint) bool {
+	if last == curr {
+		return true
+	}
+
+	if last.DNSName != curr.DNSName {
+		return false
+	}
+	if !reflect.DeepEqual(last.Targets, curr.Targets) {
+		return false
+	}
+	if last.RecordType != curr.RecordType {
+		return false
+	}
+	if last.SetIdentifier != curr.SetIdentifier {
+		return false
+	}
+	if last.RecordTTL != curr.RecordTTL {
+		return false
+	}
+	if !reflect.DeepEqual(last.ProviderSpecific, curr.ProviderSpecific) {
+		return false
+	}
+
+	return true
 }

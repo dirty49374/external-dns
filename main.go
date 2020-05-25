@@ -334,7 +334,7 @@ func main() {
 		// Add RunOnce as the handler function that will be called when ingress/service sources have changed.
 		// Note that k8s Informers will perform an initial list operation, which results in the handler
 		// function initially being called for every Service/Ingress that exists
-		ctrl.Source.AddEventHandler(ctx, func() { ctrl.ScheduleRunOnce(time.Now()) })
+		ctrl.Source.AddEventHandler(ctx, func() { ctrl.ScheduleTestOnce(time.Now()) })
 	}
 
 	ctrl.ScheduleRunOnce(time.Now())
