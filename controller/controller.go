@@ -18,6 +18,9 @@ package controller
 
 import (
 	"context"
+	"math/rand"
+	"reflect"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -110,12 +113,49 @@ type Controller struct {
 	Policy plan.Policy
 	// The interval between individual synchronizations
 	Interval time.Duration
+	// The interval when error occurred
+	IntervalError time.Duration
+	// The jitter duration of synchronizations interval
+	IntervalJitter time.Duration
 	// The DomainFilter defines which DNS records to keep or exclude
 	DomainFilter endpoint.DomainFilter
+	// List of desired records that successfully synced
+	lastDesiredRecords []*endpoint.Endpoint
+	// mutex
+	mutex sync.Mutex
+	// is running
+	running bool
+}
+
+func (c *Controller) setRunning() bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.running {
+		return false
+	}
+	c.running = true
+	return true
+}
+
+func (c *Controller) clearRunning() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.running = false
 }
 
 // RunOnce runs a single iteration of a reconciliation loop.
 func (c *Controller) RunOnce(ctx context.Context) error {
+	log.Info("XXX: RunOnce() started")
+	defer log.Info("XXX: RunOnce() finished")
+
+	if !c.setRunning() {
+		return nil
+	}
+
+	defer c.clearRunning()
+
 	records, err := c.Registry.Records(ctx)
 	if err != nil {
 		registryErrorsTotal.Inc()
@@ -150,24 +190,111 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		return err
 	}
 
+	c.lastDesiredRecords = endpoints
+
 	lastSyncTimestamp.SetToCurrentTime()
 	return nil
 }
 
+func (c *Controller) TestAndRunOnce(ctx context.Context) error {
+	if c.lastDesiredRecords == nil {
+		log.Trace("XXX: test run denied - no lastrun")
+		return nil
+	}
+
+	endpoints, err := c.Source.Endpoints()
+	if err != nil {
+		log.Trace("XXX: test run denied - source error")
+		return err
+	}
+
+	if endpointsEquals(c.lastDesiredRecords, endpoints) {
+		log.Trace("XXX: test run denied - same")
+		return nil
+	}
+
+	return c.RunOnce(ctx)
+}
+
+func (c *Controller) randJitter() time.Duration {
+	return time.Duration(rand.Int63n(int64(c.IntervalJitter)))
+}
+
 // Run runs RunOnce in a loop with a delay until stopChan receives a value.
 func (c *Controller) Run(ctx context.Context, stopChan <-chan struct{}) {
-	ticker := time.NewTicker(c.Interval)
-	defer ticker.Stop()
 	for {
 		err := c.RunOnce(ctx)
 		if err != nil {
 			log.Error(err)
 		}
+
+		jitter := c.randJitter()
+		interval := c.Interval + jitter
+		if err != nil && c.IntervalError != 0 {
+			interval = c.IntervalError + jitter
+		}
+		log.Info("XXX: sleep interval - ", interval)
+
 		select {
-		case <-ticker.C:
+		case <-time.After(interval):
 		case <-stopChan:
 			log.Info("Terminating main controller loop")
 			return
 		}
 	}
+}
+
+func endpointsEquals(last []*endpoint.Endpoint, curr []*endpoint.Endpoint) bool {
+	if len(last) != len(curr) {
+		log.Tracef("Test: # of records changed (last=%d current=%d)", len(last), len(curr))
+		return false
+	}
+
+	lastEndpoints := make(map[string]*endpoint.Endpoint, len(last))
+	for _, endpoint := range last {
+		lastEndpoints[endpoint.DNSName] = endpoint
+	}
+
+	for _, currEndpoint := range curr {
+		lastEndpoint, ok := lastEndpoints[currEndpoint.DNSName]
+		if !ok {
+			log.Infof("Test: found new record (%s)", currEndpoint.DNSName)
+			return false
+		}
+
+		if !endpointEquals(lastEndpoint, currEndpoint) {
+			log.Infof("Test: found changed record (%s)", currEndpoint.DNSName)
+			return false
+		}
+	}
+
+	log.Infof("Test: not changed")
+	return true
+}
+
+func endpointEquals(last *endpoint.Endpoint, curr *endpoint.Endpoint) bool {
+	if last == curr {
+		return true
+	}
+
+	if last.DNSName != curr.DNSName {
+		return false
+	}
+	if !reflect.DeepEqual(last.Targets, curr.Targets) {
+		return false
+	}
+	if last.RecordType != curr.RecordType {
+		return false
+	}
+	if last.SetIdentifier != curr.SetIdentifier {
+		return false
+	}
+	if last.RecordTTL != curr.RecordTTL {
+		return false
+	}
+	if !reflect.DeepEqual(last.ProviderSpecific, curr.ProviderSpecific) {
+		return false
+	}
+
+	return true
 }

@@ -288,18 +288,20 @@ func main() {
 	}
 
 	ctrl := controller.Controller{
-		Source:       endpointsSource,
-		Registry:     r,
-		Policy:       policy,
-		Interval:     cfg.Interval,
-		DomainFilter: domainFilter,
+		Source:         endpointsSource,
+		Registry:       r,
+		Policy:         policy,
+		Interval:       cfg.Interval,
+		IntervalJitter: cfg.IntervalJitter,
+		IntervalError:  cfg.IntervalError,
+		DomainFilter:   domainFilter,
 	}
 
 	if cfg.UpdateEvents {
 		// Add RunOnce as the handler function that will be called when ingress/service sources have changed.
 		// Note that k8s Informers will perform an initial list operation, which results in the handler
 		// function initially being called for every Service/Ingress that exists limted by minInterval.
-		ctrl.Source.AddEventHandler(func() error { return ctrl.RunOnce(ctx) }, stopChan, 1*time.Minute)
+		ctrl.Source.AddEventHandler(func() error { return ctrl.TestAndRunOnce(ctx) }, stopChan, 5*time.Second)
 	}
 
 	if cfg.Once {
